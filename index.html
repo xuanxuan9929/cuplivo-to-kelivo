@@ -571,8 +571,9 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     }
 
     h.push('<h2>下一步</h2><ul>');
+    h.push('<li><b>先检查 Kelivo 的开关</b>：Kelivo → 设置 → 数据备份 → 看「<b>聊天记录</b>」这个开关是不是开着。这个是导入导出的总闸——关着的时候，导入<b>不会恢复任何一条对话</b>，设置和助手照样能进去，表现就是「别的都过去了，就聊天记录没有」。</li>');
     if (!R.hasChatsJson || (R.convCount === 0 && R.msgCount === 0)){
-      h.push('<li>当前这份转换结果不含聊天记录，导入后依旧看不到对话。建议先按上面的说明回 Cuplivo 重导一份完整备份。</li>');
+      h.push('<li>另外，当前这份转换结果本身也不含聊天记录（见上方结论），需要先回 Cuplivo 重导一份完整备份。</li>');
     } else {
       h.push('<li>点下方按钮保存文件，去 Kelivo → 设置 → 数据备份 → 导入本地备份文件。</li>');
       h.push('<li>导入完成后，在 Kelivo 侧边栏逐个切助手看——会话是按助手分组的，切成「全部」或对应助手才会显示。</li>');
