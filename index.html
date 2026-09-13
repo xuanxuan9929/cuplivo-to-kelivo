@@ -197,6 +197,15 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   function run(file){
     var R = {
       srcName: file.name,
+      hasManifest: false,
+      hasChatsJson: false,
+      sourceFiles: [],
+      sourceMediaDirs: [],
+      convCount: 0,
+      msgCount: 0,
+      assistantList: [],
+      orphanByNull: 0,
+      orphanByMissing: 0,
       removedSettings: [],
       keptSettings: 0,
       convFieldStrips: {},
@@ -212,8 +221,26 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     };
 
     JSZip.loadAsync(file).then(function(zip){
+      // 0. 源备份体检：先看清里面究竟有什么
+      R.hasManifest = !!zip.file('manifest.json');
+      R.hasChatsJson = !!zip.file('chats.json');
+      var allNames = Object.keys(zip.files);
+      R.sourceFiles = allNames.filter(function(n){
+        return !zip.files[n].dir && n.indexOf('/') === -1;
+      });
+      var dirSet = {};
+      allNames.forEach(function(n){
+        if (zip.files[n].dir){
+          var top = n.split('/')[0];
+          if (top) dirSet[top] = true;
+        } else if (n.indexOf('/') > 0){
+          dirSet[n.split('/')[0]] = true;
+        }
+      });
+      R.sourceMediaDirs = Object.keys(dirSet);
+
       // 1. 识别格式
-      if (zip.file('manifest.json')){
+      if (R.hasManifest){
         throw new Error('这个备份已经是 Kelivo 新版格式（含 manifest.json），不需要转换——直接导入即可。若仍失败，请把报错截图发我。');
       }
       var settingsEntry = zip.file('settings.json');
@@ -249,6 +276,27 @@ https://github.com/nodeca/pako/blob/main/LICENSE
           R.notes.push('检测到新版记忆键 memory_entries_v1；Kelivo 同样认识它，已原样保留。');
         }
 
+        // 助手清单：孤儿会话判定与报告都要用
+        var validAssistantIds = {};
+        try {
+          var rawA0 = cleanSettings['assistants_v1'];
+          var arr0 = (typeof rawA0 === 'string') ? JSON.parse(rawA0) : null;
+          if (!Array.isArray(arr0)){
+            // 助手键被剔掉了：尝试从原始 settings 里抢救清单，保证会话可见
+            var rawA1 = settings['assistants_v1'];
+            arr0 = (typeof rawA1 === 'string') ? JSON.parse(rawA1) : null;
+            R.notes.push('助手定义（assistants_v1）未通过 Kelivo 校验；已改用原始清单做会话归属匹配。');
+          }
+          if (Array.isArray(arr0)){
+            arr0.forEach(function(a){
+              if (a && typeof a.id === 'string' && a.id){
+                validAssistantIds[a.id] = true;
+                R.assistantList.push({id: a.id, name: String(a.name || '(未命名)')});
+              }
+            });
+          }
+        } catch (e){ R.notes.push('助手清单解析失败，所有会话将按无主处理。'); }
+
         progress(0.35);
         goBtn.textContent = '正在整理会话…';
 
@@ -274,7 +322,14 @@ https://github.com/nodeca/pako/blob/main/LICENSE
               if (CONV_KEEP.indexOf(k) !== -1) o[k] = c[k];
               else R.convFieldStrips[k] = (R.convFieldStrips[k]||0)+1;
             });
-            if (o.assistantId === null || o.assistantId === undefined) orphanIds.push(o.id);
+            if (o.assistantId === null || o.assistantId === undefined){
+              R.orphanByNull++;
+              orphanIds.push(o.id);
+            } else if (!validAssistantIds[o.assistantId]){
+              // 助手在 Kelivo 侧不存在 → 会话在 UI 里不可见，必须重新归属
+              R.orphanByMissing++;
+              orphanIds.push(o.id);
+            }
             cleanConvs.push(o);
           });
 
@@ -311,6 +366,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
             cleanMsgs.push(o);
           });
 
+          R.convCount = cleanConvs.length;
+          R.msgCount = cleanMsgs.length;
           outChats.version = 1;
           outChats.conversations = cleanConvs;
           outChats.messages = cleanMsgs;
@@ -424,8 +481,34 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
     var r = $('report');
     var h = [];
-    h.push('<div class="tag ok">转换完成</div><b>报告</b>');
+
+    // ── 结论区：先说清这次到底带没带聊天记录 ──
+    if (!R.hasChatsJson){
+      h.push('<div class="tag err">源备份没有 chats.json</div><b>这份备份里根本没有聊天记录</b>');
+      h.push('<ul><li>转换结果只有设置和助手，聊天记录不可能带过去——不是转换的问题，是<b>源备份本身不含聊天</b>。</li>');
+      h.push('<li>多半是导出时没勾选「包含聊天记录 / 包含聊天数据」，或者勾的是「仅设置」模式。</li>');
+      h.push('<li>请回 Cuplivo 重新导出一次：设置 → 数据备份 → 导出，确认勾上包含聊天记录（体积会明显变大）。然后用新备份再跑一遍这个工具。</li></ul>');
+    } else if (R.convCount === 0 && R.msgCount === 0){
+      h.push('<div class="tag warn">chats.json 存在但里面是空的</div><b>会话和消息数都是 0</b>');
+      h.push('<ul><li>chats.json 文件在，但没有任何会话记录。可能是源备份导成了增量包（cuplivo_incr_），或导出时选错了范围。</li>');
+      h.push('<li>请回 Cuplivo 导出一次<b>完整备份</b>（不是增量），再跑一遍。</li></ul>');
+    } else {
+      h.push('<div class="tag ok">转换完成</div><b>聊天记录已一并转换</b>');
+      h.push('<ul><li>会话 <b>' + R.convCount + '</b> 个，消息 <b>' + R.msgCount + '</b> 条。</li>');
+      h.push('<li>导入 Kelivo 后，会话是<b>按助手分组</b>显示的——记得在侧边栏切到对应助手，而不是只看首页。</li></ul>');
+    }
+
+    if (R.orphanByMissing > 0){
+      h.push('<h2>为什么有的会话原本会「消失」</h2><ul>');
+      h.push('<li>' + R.orphanByMissing + ' 个会话的助手在该备份的助手清单里找不到。Kelivo 侧不显示这类会话，已自动改挂到占位助手。</li>');
+      h.push('<li>表现上就是：数据其实在里面，但界面看不到。这次转换已经处理掉了。</li></ul>');
+    }
+
     h.push('<div class="kv"><span>源文件</span><span>' + esc(R.srcName) + '</span></div>');
+    h.push('<div class="kv"><span>源含 chats.json</span><span>' + (R.hasChatsJson ? '是' : '否') + '</span></div>');
+    h.push('<div class="kv"><span>源含 manifest.json</span><span>' + (R.hasManifest ? '是' : '否') + '</span></div>');
+    h.push('<div class="kv"><span>转换后会话 / 消息</span><span>' + R.convCount + ' / ' + R.msgCount + '</span></div>');
+    h.push('<div class="kv"><span>助手数</span><span>' + R.assistantList.length + '</span></div>');
     h.push('<div class="kv"><span>保留下来的设置项</span><span>' + R.keptSettings + '</span></div>');
     h.push('<div class="kv"><span>清理掉的设置项</span><span>' + R.removedSettings.length + '</span></div>');
     h.push('<div class="kv"><span>媒体文件</span><span>' + (R.mediaSkipped ? ('跳过 ' + R.mediaSkipped + ' 个') : (R.media + ' 个')) + '</span></div>');
@@ -433,6 +516,27 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     if (R.droppedMessages) h.push('<div class="kv"><span>丢弃的消息（缺必需字段）</span><span>' + R.droppedMessages + '</span></div>');
     if (R.partsFixed) h.push('<div class="kv"><span>修正的附件片段</span><span>' + R.partsFixed + '</span></div>');
     if (R.orphanConvs) h.push('<div class="kv"><span>挂到「' + esc(R.placeholderAssistant) + '」的无主会话</span><span>' + R.orphanConvs + '</span></div>');
+
+    h.push('<h2>源备份顶层内容</h2><ul>');
+    if (R.sourceFiles.length){
+      R.sourceFiles.slice(0, 20).forEach(function(n){ h.push('<li><code>' + esc(n) + '</code></li>'); });
+      if (R.sourceFiles.length > 20) h.push('<li>……还有 ' + (R.sourceFiles.length - 20) + ' 个文件</li>');
+    } else {
+      h.push('<li>（没有顶层文件）</li>');
+    }
+    if (R.sourceMediaDirs.length){
+      h.push('<li>目录：' + R.sourceMediaDirs.slice(0, 20).map(function(x){ return '<code>' + esc(x) + '/</code>'; }).join(' ') + '</li>');
+    }
+    h.push('</ul>');
+
+    if (R.assistantList.length){
+      h.push('<h2>助手清单</h2><ul>');
+      R.assistantList.slice(0, 20).forEach(function(a){
+        h.push('<li>' + esc(a.name) + ' <code>' + esc(a.id.substring(0, 12)) + '…</code></li>');
+      });
+      if (R.assistantList.length > 20) h.push('<li>……还有 ' + (R.assistantList.length - 20) + ' 个</li>');
+      h.push('</ul>');
+    }
 
     if (R.removedSettings.length){
       h.push('<h2>被清理的设置项（Kelivo 不接受这些值）</h2><ul>');
@@ -466,7 +570,15 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       h.push('<h2>关于媒体</h2><ul><li>这次跳过了图片/文件，导入后历史消息里的图片会显示为不可用，但文字和会话结构完整。</li><li>确认能正常导入后，可以再用同一份原备份、不勾选「跳过媒体文件」重新转换一次，做完整导入。</li></ul>');
     }
 
-    h.push('<h2>下一步</h2><ul><li>点下方按钮保存文件，去 Kelivo → 设置 → 数据备份 → 导入本地备份文件。</li><li>如果提示格式错误，把上面的「被清理的设置项」和 Kelivo 的报错原文发我。</li></ul>');
+    h.push('<h2>下一步</h2><ul>');
+    if (!R.hasChatsJson || (R.convCount === 0 && R.msgCount === 0)){
+      h.push('<li>当前这份转换结果不含聊天记录，导入后依旧看不到对话。建议先按上面的说明回 Cuplivo 重导一份完整备份。</li>');
+    } else {
+      h.push('<li>点下方按钮保存文件，去 Kelivo → 设置 → 数据备份 → 导入本地备份文件。</li>');
+      h.push('<li>导入完成后，在 Kelivo 侧边栏逐个切助手看——会话是按助手分组的，切成「全部」或对应助手才会显示。</li>');
+      h.push('<li>仍然对不上，把这份报告的截图发我。</li>');
+    }
+    h.push('</ul>');
 
     r.innerHTML = h.join('');
     r.classList.remove('hide');
